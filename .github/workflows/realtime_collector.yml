@@ -1,55 +1,85 @@
-name: Realtime Data Collector
+name: Ultra Realtime Data Collector
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # รันทุก 5 นาที
-  workflow_dispatch:  # ให้กดรันเองได้ด้วย
+    - cron: "* * * * *"   # รันทุก 1 นาที
+  workflow_dispatch:      # สามารถรันเองได้จากหน้า Actions
 
 jobs:
   fetch_data:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
 
-      - name: Install dependencies
-        run: |
-          pip install requests pandas sqlalchemy
+    - name: Install dependencies
+      run: |
+        pip install requests pandas sqlalchemy
 
-      - name: Fetch realtime data
-        run: |
-          import requests, pandas as pd, sqlite3, datetime, os
+    - name: Fetch realtime data
+      run: |
+        import requests, pandas as pd, sqlite3, datetime, os
 
-          API_KEY = os.getenv("FINNHUB_API", "d2veodpr01qm5lo80ga0d2veodpr01qm5lo80gag")
-          symbols = ["XAUUSD", "BTCUSD", "NDX", "EURUSD"]
+        API_KEY = os.getenv("FINNHUB_API", "d2veodpr01qm5lo80ga0d2veodpr01qm5lo80gag")
+        symbols = ["XAUUSD", "BTCUSD", "NDX", "EURUSD"]
 
-          conn = sqlite3.connect("market_data.db")
-          for s in symbols:
-              url = f"https://finnhub.io/api/v1/quote?symbol={s}&token={API_KEY}"
-              data = requests.get(url).json()
-              if "c" in data:
-                  df = pd.DataFrame([{
-                      "symbol": s,
-                      "price": data["c"],
-                      "high": data["h"],
-                      "low": data["l"],
-                      "open": data["o"],
-                      "prev_close": data["pc"],
-                      "timestamp": datetime.datetime.utcnow().isoformat()
-                  }])
-                  df.to_sql("realtime_prices", conn, if_exists="append", index=False)
-          conn.close()
+        conn = sqlite3.connect("market_data.db")
 
-      - name: Commit and push updated data
-        run: |
-          git config --global user.name "dorn-naja"
-          git config --global user.email "dornnaja023@gmail.com"
-          git add market_data.db || true
-          git commit -m "Update realtime market data" || true
-          git push
+        for s in symbols:
+            url = f"https://finnhub.io/api/v1/quote?symbol={s}&token={API_KEY}"
+            data = requests.get(url).json()
+            if "c" in data:
+                df = pd.DataFrame([{
+                    "symbol": s,
+                    "price": data["c"],
+                    "high": data["h"],
+                    "low": data["l"],
+                    "open": data["o"],
+                    "prev_close": data["pc"],
+                    "timestamp": datetime.datetime.utcnow().isoformat()
+                }])
+                df.to_sql("realtime_prices", conn, if_exists="append", index=False)
+        conn.close()
+
+    - name: Manage old data
+      run: |
+        import sqlite3, pandas as pd, datetime
+
+        now = datetime.datetime.utcnow()
+        conn = sqlite3.connect("market_data.db")
+
+        df = pd.read_sql("SELECT * FROM realtime_prices", conn)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+        one_year_ago = now - datetime.timedelta(days=365)
+        three_years_ago = now - datetime.timedelta(days=365*3)
+
+        # ย้ายข้อมูลเก่ากว่า 1 ปี -> daily_summary.db
+        old_data = df[df["timestamp"] < one_year_ago]
+        if not old_data.empty:
+            daily = old_data.groupby([df["symbol"], df["timestamp"].dt.date]).agg({
+                "price": "mean", "high": "max", "low": "min",
+                "open": "first", "prev_close": "last"
+            }).reset_index()
+            conn2 = sqlite3.connect("daily_summary.db")
+            daily.to_sql("daily_prices", conn2, if_exists="append", index=False)
+            conn2.close()
+
+        # ลบข้อมูลเกิน 3 ปี
+        df_new = df[df["timestamp"] >= three_years_ago]
+        df_new.to_sql("realtime_prices", conn, if_exists="replace", index=False)
+        conn.close()
+
+    - name: Commit and push updated data
+      run: |
+        git config --global user.name "dorn-naja"
+        git config --global user.email "dornnaja023@gmail.com"
+        git add market_data.db daily_summary.db || true
+        git commit -m "Update realtime market data" || true
+        git push
