@@ -1,0 +1,55 @@
+name: Realtime Data Collector
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # รันทุก 5 นาที
+  workflow_dispatch:  # ให้กดรันเองได้ด้วย
+
+jobs:
+  fetch_data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install requests pandas sqlalchemy
+
+      - name: Fetch realtime data
+        run: |
+          import requests, pandas as pd, sqlite3, datetime, os
+
+          API_KEY = os.getenv("FINNHUB_API", "d2veodpr01qm5lo80ga0d2veodpr01qm5lo80gag")
+          symbols = ["XAUUSD", "BTCUSD", "NDX", "EURUSD"]
+
+          conn = sqlite3.connect("market_data.db")
+          for s in symbols:
+              url = f"https://finnhub.io/api/v1/quote?symbol={s}&token={API_KEY}"
+              data = requests.get(url).json()
+              if "c" in data:
+                  df = pd.DataFrame([{
+                      "symbol": s,
+                      "price": data["c"],
+                      "high": data["h"],
+                      "low": data["l"],
+                      "open": data["o"],
+                      "prev_close": data["pc"],
+                      "timestamp": datetime.datetime.utcnow().isoformat()
+                  }])
+                  df.to_sql("realtime_prices", conn, if_exists="append", index=False)
+          conn.close()
+
+      - name: Commit and push updated data
+        run: |
+          git config --global user.name "dorn-naja"
+          git config --global user.email "dornnaja023@gmail.com"
+          git add market_data.db || true
+          git commit -m "Update realtime market data" || true
+          git push
