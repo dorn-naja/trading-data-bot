@@ -1,5 +1,6 @@
 name: Ultra Realtime Scraper
-
+run: |
+        python - <<'EOF'
 on:
   schedule:
     - cron: "*/1 * * * *"  # รันทุก 1 นาที
