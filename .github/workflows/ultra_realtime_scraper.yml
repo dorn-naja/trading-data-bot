@@ -1,0 +1,154 @@
+name: Ultra Realtime Scraper
+
+on:
+  schedule:
+    - cron: "*/1 * * * *"  # รันทุก 1 นาที
+  workflow_dispatch:
+
+jobs:
+  scrape_and_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4 pandas google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client sqlalchemy
+
+    - name: Run realtime scraper
+      run: |
+        import os, time, json, sqlite3, datetime, requests
+        import pandas as pd
+        from bs4 import BeautifulSoup
+
+        # =============== Price Scraper (Investing + TradingView) ===============
+        assets = {
+            "XAUUSD": ["https://www.investing.com/currencies/xau-usd", "https://www.tradingview.com/symbols/XAUUSD/"],
+            "BTCUSD": ["https://www.investing.com/crypto/bitcoin/btc-usd", "https://www.tradingview.com/symbols/BTCUSD/"],
+            "NAS100": ["https://www.investing.com/indices/nq-100", "https://www.tradingview.com/symbols/NAS100/"],
+            "EURUSD": ["https://www.investing.com/currencies/eur-usd", "https://www.tradingview.com/symbols/EURUSD/"]
+        }
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        data_rows = []
+
+        for sym, urls in assets.items():
+            prices = []
+            for u in urls:
+                try:
+                    html = requests.get(u, headers=headers, timeout=10).text
+                    soup = BeautifulSoup(html, "html.parser")
+                    text = soup.get_text()
+                    if "USD" in sym and "$" in text:
+                        nums = [float(s.replace(",", "")) for s in text.split() if s.replace(",", "").replace(".", "").isdigit()]
+                        if nums:
+                            prices.append(nums[0])
+                except Exception as e:
+                    print(f"❌ {sym} from {u[:30]}... {e}")
+            if prices:
+                avg_price = sum(prices)/len(prices)
+                data_rows.append({
+                    "symbol": sym,
+                    "price": round(avg_price, 4),
+                    "timestamp": datetime.datetime.utcnow().isoformat()
+                })
+
+        # Save prices
+        conn = sqlite3.connect("market_data.db")
+        df = pd.DataFrame(data_rows)
+        if not df.empty:
+            df.to_sql("prices", conn, if_exists="append", index=False)
+            df.to_json("realtime_data.json", orient="records", indent=2)
+        conn.close()
+
+        # =============== News Scraper (Reuters + ForexFactory) ===============
+        news_all = []
+        try:
+            reu = requests.get("https://www.reuters.com/markets/", headers=headers, timeout=10).text
+            soup = BeautifulSoup(reu, "html.parser")
+            for n in soup.find_all("a", href=True)[:10]:
+                title = n.get_text().strip()
+                if title and len(title) > 25:
+                    news_all.append({
+                        "source": "Reuters",
+                        "headline": title,
+                        "url": "https://www.reuters.com" + n['href'],
+                        "time": datetime.datetime.utcnow().isoformat()
+                    })
+        except Exception as e:
+            print("Reuters error:", e)
+
+        try:
+            ff = requests.get("https://www.forexfactory.com/news", headers=headers, timeout=10).text
+            soup = BeautifulSoup(ff, "html.parser")
+            for n in soup.find_all("a", href=True)[:10]:
+                title = n.get_text().strip()
+                if title and len(title) > 25:
+                    news_all.append({
+                        "source": "ForexFactory",
+                        "headline": title,
+                        "url": "https://www.forexfactory.com" + n['href'],
+                        "time": datetime.datetime.utcnow().isoformat()
+                    })
+        except Exception as e:
+            print("ForexFactory error:", e)
+
+        if news_all:
+            pd.DataFrame(news_all).to_json("news_data.json", orient="records", indent=2)
+
+        # =============== Macro Data (World Bank) ===============
+        if datetime.datetime.utcnow().hour == 0:  # อัปเดตรายวัน
+            try:
+                macro = requests.get("https://api.worldbank.org/v2/country/US/indicator/NY.GDP.MKTP.CD?format=json").json()
+                if len(macro) > 1:
+                    recent = macro[1][0]
+                    info = {
+                        "country": "US",
+                        "indicator": "GDP (Current US$)",
+                        "value": recent["value"],
+                        "date": recent["date"],
+                        "time": datetime.datetime.utcnow().isoformat()
+                    }
+                    pd.DataFrame([info]).to_json("macro_data.json", indent=2)
+            except Exception as e:
+                print("WorldBank error:", e)
+
+    - name: Upload to Google Drive
+      env:
+        GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
+      run: |
+        import os, json, time
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+
+        creds_json = os.environ["GDRIVE_CREDENTIALS_JSON"]
+        creds_dict = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=["https://www.googleapis.com/auth/drive.file"]
+        )
+        drive_service = build("drive", "v3", credentials=creds)
+
+        folder_name = "Data githup"
+        query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+        results = drive_service.files().list(q=query, fields="files(id,name)").execute()
+        folder_id = results["files"][0]["id"] if results["files"] else None
+
+        if not folder_id:
+            folder = drive_service.files().create(
+                body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}, fields="id"
+            ).execute()
+            folder_id = folder.get("id")
+
+        for f in ["market_data.db", "realtime_data.json", "news_data.json", "macro_data.json"]:
+            if os.path.exists(f):
+                file_metadata = {"name": f, "parents": [folder_id]}
+                media = MediaFileUpload(f, resumable=True)
+                drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
