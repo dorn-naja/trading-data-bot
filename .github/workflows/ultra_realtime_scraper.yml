@@ -1,6 +1,5 @@
 name: Ultra Realtime Scraper
-run: |
-        python - <<'EOF'
+
 on:
   schedule:
     - cron: "*/1 * * * *"  # รันทุก 1 นาที
@@ -25,11 +24,11 @@ jobs:
 
     - name: Run realtime scraper
       run: |
+        python - <<'EOF'
         import os, time, json, sqlite3, datetime, requests
         import pandas as pd
         from bs4 import BeautifulSoup
 
-        # =============== Price Scraper (Investing + TradingView) ===============
         assets = {
             "XAUUSD": ["https://www.investing.com/currencies/xau-usd", "https://www.tradingview.com/symbols/XAUUSD/"],
             "BTCUSD": ["https://www.investing.com/crypto/bitcoin/btc-usd", "https://www.tradingview.com/symbols/BTCUSD/"],
@@ -47,10 +46,9 @@ jobs:
                     html = requests.get(u, headers=headers, timeout=10).text
                     soup = BeautifulSoup(html, "html.parser")
                     text = soup.get_text()
-                    if "USD" in sym and "$" in text:
-                        nums = [float(s.replace(",", "")) for s in text.split() if s.replace(",", "").replace(".", "").isdigit()]
-                        if nums:
-                            prices.append(nums[0])
+                    nums = [float(s.replace(",", "")) for s in text.split() if s.replace(",", "").replace(".", "").isdigit()]
+                    if nums:
+                        prices.append(nums[0])
                 except Exception as e:
                     print(f"❌ {sym} from {u[:30]}... {e}")
             if prices:
@@ -61,7 +59,6 @@ jobs:
                     "timestamp": datetime.datetime.utcnow().isoformat()
                 })
 
-        # Save prices
         conn = sqlite3.connect("market_data.db")
         df = pd.DataFrame(data_rows)
         if not df.empty:
@@ -69,7 +66,6 @@ jobs:
             df.to_json("realtime_data.json", orient="records", indent=2)
         conn.close()
 
-        # =============== News Scraper (Reuters + ForexFactory) ===============
         news_all = []
         try:
             reu = requests.get("https://www.reuters.com/markets/", headers=headers, timeout=10).text
@@ -104,8 +100,7 @@ jobs:
         if news_all:
             pd.DataFrame(news_all).to_json("news_data.json", orient="records", indent=2)
 
-        # =============== Macro Data (World Bank) ===============
-        if datetime.datetime.utcnow().hour == 0:  # อัปเดตรายวัน
+        if datetime.datetime.utcnow().hour == 0:
             try:
                 macro = requests.get("https://api.worldbank.org/v2/country/US/indicator/NY.GDP.MKTP.CD?format=json").json()
                 if len(macro) > 1:
@@ -120,12 +115,14 @@ jobs:
                     pd.DataFrame([info]).to_json("macro_data.json", indent=2)
             except Exception as e:
                 print("WorldBank error:", e)
+        EOF
 
     - name: Upload to Google Drive
       env:
         GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
       run: |
-        import os, json, time
+        python - <<'EOF'
+        import os, json
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
@@ -153,3 +150,4 @@ jobs:
                 file_metadata = {"name": f, "parents": [folder_id]}
                 media = MediaFileUpload(f, resumable=True)
                 drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        EOF
