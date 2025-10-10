@@ -1,15 +1,16 @@
-name: Historical + News Hybrid Collector
+name: Global Historical + News Hybrid Collector
 
 on:
-  workflow_dispatch:    # สามารถกด Run ด้วยตัวเองได้จากหน้า Actions
+  workflow_dispatch:   # กด Run เองได้
+  schedule:
+    - cron: "0 0 * * 0"   # รันอัตโนมัติทุกสัปดาห์ (UTC)
 
 jobs:
-  collect_and_upload:
+  collect_and_merge:
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
-      # ต้องใช้ actions/checkout@v3 เพื่อให้เข้าถึง repo ได้
       uses: actions/checkout@v3
 
     - name: Setup Python
@@ -19,81 +20,116 @@ jobs:
 
     - name: Install dependencies
       run: |
-        # ติดตั้งเฉพาะไลบรารีที่จำเป็น
-        pip install requests beautifulsoup4 pandas sqlalchemy
+        pip install pandas requests beautifulsoup4 lxml sqlalchemy
 
-    - name: Run historical data collector
+    - name: Run unified global collector
       run: |
         python - <<'EOF'
-        import requests, pandas as pd, datetime, sqlite3, json
+        import pandas as pd, requests, json, datetime, sqlite3, time
         from bs4 import BeautifulSoup
 
         headers = {"User-Agent": "Mozilla/5.0"}
+        base_date = datetime.date.today()
+        start_date = (base_date - datetime.timedelta(days=365*3)).strftime("%Y%m%d")
+        end_date = base_date.strftime("%Y%m%d")
+
+        print("🌐 เริ่มดึงข้อมูลย้อนหลัง 3 ปีจากทุกแหล่ง...")
+
+        # ========== 1️⃣ ราคาสินทรัพย์จากหลายแหล่ง ==========
         assets = {
-            "XAUUSD": "https://stooq.com/q/d/l/?s=xauusd&i=d",
-            "BTCUSD": "https://stooq.com/q/d/l/?s=btcusd&i=d",
-            "NAS100": "https://stooq.com/q/d/l/?s=^ndx&i=d",
-            "EURUSD": "https://stooq.com/q/d/l/?s=eurusd&i=d"
+            "XAUUSD": f"https://stooq.com/q/d/l/?s=xauusd&d1={start_date}&d2={end_date}&i=d",
+            "BTCUSD": "https://coinmetrics.io/api/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD",
+            "NAS100": f"https://stooq.com/q/d/l/?s=^ndx&d1={start_date}&d2={end_date}&i=d",
+            "EURUSD": f"https://stooq.com/q/d/l/?s=eurusd&d1={start_date}&d2={end_date}&i=d",
+            "GBPUSD": f"https://stooq.com/q/d/l/?s=gbpusd&d1={start_date}&d2={end_date}&i=d",
+            "USDJPY": f"https://stooq.com/q/d/l/?s=usdjpy&d1={start_date}&d2={end_date}&i=d"
         }
 
-        print("📊 เริ่มดึงข้อมูลราคาย้อนหลัง...")
-
-        dfs = []
+        price_dfs = []
         for sym, url in assets.items():
             try:
-                df = pd.read_csv(url)
-                df["symbol"] = sym
-                dfs.append(df)
+                print(f"⏳ กำลังโหลดราคา {sym} ...")
+                if "coinmetrics" in url:
+                    data = requests.get(url, timeout=15).json()["data"]
+                    df = pd.DataFrame(data)
+                    df["time"] = pd.to_datetime(df["time"])
+                    df = df.rename(columns={"PriceUSD": "Close"})
+                    df["Symbol"] = sym
+                    df = df[["time","Close","Symbol"]].rename(columns={"time":"Date"})
+                else:
+                    df = pd.read_csv(url)
+                    df["Symbol"] = sym
+                price_dfs.append(df)
+                time.sleep(2)
             except Exception as e:
-                print("❌ Error fetching", sym, e)
+                print(f"❌ โหลด {sym} ไม่สำเร็จ:", e)
 
-        all_data = pd.concat(dfs)
-        conn = sqlite3.connect("historical_data.db")
-        all_data.to_sql("history", conn, if_exists="replace", index=False)
+        if price_dfs:
+            all_prices = pd.concat(price_dfs, ignore_index=True)
+            all_prices.to_csv("global_prices.csv", index=False)
+            print(f"✅ ดึงราคาสำเร็จ {len(all_prices)} แถว")
+        else:
+            print("⚠️ ไม่มีข้อมูลราคาจากทุกแหล่ง!")
+
+        # ========== 2️⃣ ข่าวเศรษฐกิจจากหลายเว็บ ==========
+        print("📰 เริ่มดึงข่าวจากหลายแหล่ง...")
+
+        news_sources = {
+            "Reuters": "https://www.reuters.com/markets/",
+            "ForexFactory": "https://www.forexfactory.com/news",
+            "Investing": "https://www.investing.com/news/",
+            "CNBC": "https://www.cnbc.com/world/",
+            "MarketWatch": "https://www.marketwatch.com/latest-news"
+        }
+
+        all_news = []
+        for site, url in news_sources.items():
+            try:
+                html = requests.get(url, headers=headers, timeout=10).text
+                soup = BeautifulSoup(html, "lxml")
+                titles = [a.get_text().strip() for a in soup.find_all("a", href=True)]
+                for t in titles[:30]:
+                    if len(t) > 40:
+                        all_news.append({
+                            "source": site,
+                            "headline": t,
+                            "url": url,
+                            "time": datetime.datetime.utcnow().isoformat()
+                        })
+                print(f"✅ {site}: เก็บข่าวได้ {len(titles[:30])} รายการ")
+                time.sleep(2)
+            except Exception as e:
+                print(f"❌ {site} error:", e)
+
+        pd.DataFrame(all_news).to_json("global_news.json", indent=2, force_ascii=False)
+        print(f"🗞 รวมข่าวทั้งหมด {len(all_news)} รายการ")
+
+        # ========== 3️⃣ บันทึก SQLite ==========
+        conn = sqlite3.connect("global_data.db")
+        if price_dfs:
+            all_prices.to_sql("prices", conn, if_exists="replace", index=False)
+        if all_news:
+            pd.DataFrame(all_news).to_sql("news", conn, if_exists="replace", index=False)
         conn.close()
-        print("✅ บันทึก historical_data.db แล้ว")
+        print("📦 บันทึก global_data.db เรียบร้อย")
 
-        print("📰 เริ่มดึงข่าวเศรษฐกิจ...")
-        news_list = []
-
-        try:
-            html = requests.get("https://www.reuters.com/markets/", headers=headers).text
-            soup = BeautifulSoup(html, "html.parser")
-            for a in soup.find_all("a", href=True)[:20]:
-                t = a.get_text().strip()
-                if len(t) > 20:
-                    news_list.append({
-                        "source": "Reuters",
-                        "headline": t,
-                        "url": "https://www.reuters.com" + a["href"]
-                    })
-        except Exception as e:
-            print("Reuters error:", e)
-
-        try:
-            html = requests.get("https://www.forexfactory.com/news", headers=headers).text
-            soup = BeautifulSoup(html, "html.parser")
-            for a in soup.find_all("a", href=True)[:20]:
-                t = a.get_text().strip()
-                if len(t) > 20:
-                    news_list.append({
-                        "source": "ForexFactory",
-                        "headline": t,
-                        "url": "https://www.forexfactory.com" + a["href"]
-                    })
-        except Exception as e:
-            print("ForexFactory error:", e)
-
-        pd.DataFrame(news_list).to_json("news_archive.json", indent=2, force_ascii=False)
-        print(f"✅ บันทึกข่าวทั้งหมด {len(news_list)} รายการลง news_archive.json แล้ว")
+        # ========== 4️⃣ สรุปผล ==========
+        summary = {
+            "update_time": datetime.datetime.utcnow().isoformat(),
+            "prices_count": len(all_prices) if price_dfs else 0,
+            "news_count": len(all_news),
+            "sources_success": [k for k in news_sources.keys()],
+        }
+        with open("summary.json","w",encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        print("🧾 บันทึก summary.json สำเร็จ!")
         EOF
 
-    - name: Commit and Save Data to GitHub Repository
+    - name: Commit and Push All Data
       run: |
         git config user.name "GitHub Actions Bot"
         git config user.email "action@github.com"
-        
-        git add historical_data.db news_archive.json
+        git add global_prices.csv global_news.json global_data.db summary.json || true
         TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        git commit -m "Data Update: $TIMESTAMP" || true
+        git commit -m "🌍 Global data update: $TIMESTAMP" || true
         git push
