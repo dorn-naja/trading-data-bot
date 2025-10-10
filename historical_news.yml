@@ -1,0 +1,147 @@
+name: Historical + News Hybrid Collector
+
+on:
+  workflow_dispatch:    # กด Run เองได้
+  schedule:
+    - cron: "0 0 * * 0"  # ดึงใหม่ทุกสัปดาห์
+
+jobs:
+  collect_historical_and_news:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: |
+        pip install pandas requests beautifulsoup4 google-auth google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+    - name: Run collector
+      run: |
+        python - <<'EOF'
+        import pandas as pd, requests, datetime, json
+        from bs4 import BeautifulSoup
+
+        print("📊 เริ่มดึงข้อมูลราคาย้อนหลัง 3 ปี...")
+
+        # ===============================
+        # 1️⃣ Historical Prices
+        # ===============================
+        try:
+            url_gold = "https://stooq.com/q/d/l/?s=xauusd&d1=20220101&d2=20251010&i=d"
+            gold = pd.read_csv(url_gold)
+            gold["Symbol"] = "XAUUSD"
+            gold["Source"] = "stooq"
+
+            url_nas = "https://stooq.com/q/d/l/?s=ndx.us&d1=20220101&d2=20251010&i=d"
+            nas = pd.read_csv(url_nas)
+            nas["Symbol"] = "NAS100"
+            nas["Source"] = "stooq"
+
+            url_btc = "https://coinmetrics.io/api/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD"
+            data = requests.get(url_btc).json()["data"]
+            btc = pd.DataFrame(data)
+            btc["date"] = pd.to_datetime(btc["time"])
+            btc = btc.rename(columns={"PriceUSD": "Close"})
+            btc["Symbol"] = "BTCUSD"
+            btc["Source"] = "coinmetrics"
+            btc = btc[["date","Close","Symbol","Source"]].rename(columns={"date":"Date"})
+
+            df = pd.concat([gold, nas, btc], ignore_index=True)
+            df.to_csv("historical_data.csv", index=False)
+            print("✅ บันทึก historical_data.csv แล้ว")
+
+        except Exception as e:
+            print("❌ Historical Error:", e)
+
+        # ===============================
+        # 2️⃣ News Scraping (Reuters + ForexFactory)
+        # ===============================
+        print("📰 เริ่มดึงข่าวเศรษฐกิจ...")
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        news_all = []
+
+        try:
+            html_r = requests.get("https://www.reuters.com/markets/", headers=headers, timeout=10).text
+            soup = BeautifulSoup(html_r, "html.parser")
+            for n in soup.find_all("a", href=True)[:30]:
+                title = n.get_text().strip()
+                if len(title) > 30:
+                    news_all.append({
+                        "source": "Reuters",
+                        "headline": title,
+                        "url": "https://www.reuters.com" + n["href"],
+                        "time": datetime.datetime.utcnow().isoformat()
+                    })
+        except Exception as e:
+            print("Reuters Error:", e)
+
+        try:
+            html_f = requests.get("https://www.forexfactory.com/news", headers=headers, timeout=10).text
+            soup = BeautifulSoup(html_f, "html.parser")
+            for n in soup.find_all("a", href=True)[:30]:
+                title = n.get_text().strip()
+                if len(title) > 30:
+                    news_all.append({
+                        "source": "ForexFactory",
+                        "headline": title,
+                        "url": "https://www.forexfactory.com" + n["href"],
+                        "time": datetime.datetime.utcnow().isoformat()
+                    })
+        except Exception as e:
+            print("ForexFactory Error:", e)
+
+        if news_all:
+            with open("news_data.json", "w", encoding="utf-8") as f:
+                json.dump(news_all, f, indent=2, ensure_ascii=False)
+            print(f"✅ เก็บข่าว {len(news_all)} รายการลง news_data.json แล้ว")
+
+        with open("combined_summary.txt", "w") as f:
+            f.write(f"Historical rows: {len(df)}\n")
+            f.write(f"News headlines: {len(news_all)}\n")
+            f.write(f"Updated: {datetime.datetime.utcnow().isoformat()}\n")
+        print("📦 สรุปข้อมูลทั้งหมดบันทึกแล้ว (combined_summary.txt)")
+        EOF
+
+    - name: Upload to Google Drive
+      env:
+        GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
+      run: |
+        python - <<'EOF'
+        import os, json
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+
+        creds_json = os.environ["GDRIVE_CREDENTIALS_JSON"]
+        creds_dict = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=["https://www.googleapis.com/auth/drive.file"]
+        )
+        drive_service = build("drive", "v3", credentials=creds)
+
+        folder_name = "Data githup"
+        query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+        results = drive_service.files().list(q=query, fields="files(id,name)").execute()
+        folder_id = results["files"][0]["id"] if results["files"] else None
+
+        if not folder_id:
+            folder = drive_service.files().create(
+                body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}, fields="id"
+            ).execute()
+            folder_id = folder.get("id")
+
+        for f in ["historical_data.csv", "news_data.json", "combined_summary.txt"]:
+            if os.path.exists(f):
+                file_metadata = {"name": f, "parents": [folder_id]}
+                media = MediaFileUpload(f, resumable=True)
+                drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+                print(f"☁️ อัปโหลด {f} ไปยัง Google Drive สำเร็จ")
+        EOF
