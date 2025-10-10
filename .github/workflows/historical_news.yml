@@ -1,0 +1,103 @@
+name: Historical + News Hybrid Collector
+
+on:
+  workflow_dispatch:
+
+jobs:
+  collect_and_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 pandas google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client sqlalchemy
+
+      - name: Run historical data collector
+        run: |
+          python - <<'EOF'
+          import requests, pandas as pd, datetime, time, sqlite3, json
+          from bs4 import BeautifulSoup
+
+          headers = {"User-Agent": "Mozilla/5.0"}
+          assets = {
+              "XAUUSD": "https://stooq.com/q/d/l/?s=xauusd&i=d",
+              "BTCUSD": "https://stooq.com/q/d/l/?s=btcusd&i=d",
+              "NAS100": "https://stooq.com/q/d/l/?s=^ndx&i=d",
+              "EURUSD": "https://stooq.com/q/d/l/?s=eurusd&i=d"
+          }
+
+          dfs = []
+          for sym, url in assets.items():
+              try:
+                  df = pd.read_csv(url)
+                  df["symbol"] = sym
+                  dfs.append(df)
+              except Exception as e:
+                  print("Error fetching", sym, e)
+
+          all_data = pd.concat(dfs)
+          conn = sqlite3.connect("historical_data.db")
+          all_data.to_sql("history", conn, if_exists="replace", index=False)
+          conn.close()
+
+          # ข่าว
+          news_list = []
+          try:
+              html = requests.get("https://www.reuters.com/markets/", headers=headers).text
+              soup = BeautifulSoup(html, "html.parser")
+              for a in soup.find_all("a", href=True)[:20]:
+                  t = a.get_text().strip()
+                  if len(t) > 20:
+                      news_list.append({"source": "Reuters", "headline": t, "url": "https://www.reuters.com" + a["href"]})
+          except Exception as e:
+              print("Reuters error", e)
+
+          try:
+              html = requests.get("https://www.forexfactory.com/news", headers=headers).text
+              soup = BeautifulSoup(html, "html.parser")
+              for a in soup.find_all("a", href=True)[:20]:
+                  t = a.get_text().strip()
+                  if len(t) > 20:
+                      news_list.append({"source": "ForexFactory", "headline": t, "url": "https://www.forexfactory.com" + a["href"]})
+          except Exception as e:
+              print("FF error", e)
+
+          pd.DataFrame(news_list).to_json("news_archive.json", indent=2)
+          EOF
+
+      - name: Upload to Google Drive
+        env:
+          GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
+        run: |
+          python - <<'EOF'
+          import os, json
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          creds = service_account.Credentials.from_service_account_info(
+              json.loads(os.environ["GDRIVE_CREDENTIALS_JSON"]),
+              scopes=["https://www.googleapis.com/auth/drive.file"]
+          )
+          drive_service = build("drive", "v3", credentials=creds)
+
+          folder_name = "Data githup"
+          results = drive_service.files().list(q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'", fields="files(id)").execute()
+          folder_id = results["files"][0]["id"] if results["files"] else None
+          if not folder_id:
+              folder = drive_service.files().create(body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}, fields="id").execute()
+              folder_id = folder.get("id")
+
+          for f in ["historical_data.db", "news_archive.json"]:
+              if os.path.exists(f):
+                  media = MediaFileUpload(f, resumable=True)
+                  drive_service.files().create(body={"name": f, "parents": [folder_id]}, media_body=media, fields="id").execute()
+          EOF
