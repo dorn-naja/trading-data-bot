@@ -1,98 +1,99 @@
-Name: Historical + News Hybrid Collector
+name: Historical + News Hybrid Collector
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:    # สามารถกด Run ด้วยตัวเองได้จากหน้า Actions
 
 jobs:
   collect_and_upload:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        # ต้องใช้ actions/checkout@v3 เพื่อให้มีสิทธิ์ในการ commit/push
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      # ต้องใช้ actions/checkout@v3 เพื่อให้เข้าถึง repo ได้
+      uses: actions/checkout@v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
 
-      - name: Install dependencies
-        run: |
-          # ลบ dependencies ของ Google Drive API ที่ไม่จำเป็นออก เพื่อลดเวลาติดตั้ง
-          pip install requests beautifulsoup4 pandas sqlalchemy
-          
-      - name: Run historical data collector
-        # โค้ด Python นี้จะถูกเก็บไว้เหมือนเดิม เพราะสร้างไฟล์ .db และ .json ได้ถูกต้อง
-        run: |
-          python - <<'EOF'
-          import requests, pandas as pd, datetime, time, sqlite3, json
-          from bs4 import BeautifulSoup
+    - name: Install dependencies
+      run: |
+        # ติดตั้งเฉพาะไลบรารีที่จำเป็น
+        pip install requests beautifulsoup4 pandas sqlalchemy
 
-          headers = {"User-Agent": "Mozilla/5.0"}
-          assets = {
-              "XAUUSD": "https://stooq.com/q/d/l/?s=xauusd&i=d",
-              "BTCUSD": "https://stooq.com/q/d/l/?s=btcusd&i=d",
-              "NAS100": "https://stooq.com/q/d/l/?s=^ndx&i=d",
-              "EURUSD": "https://stooq.com/q/d/l/?s=eurusd&i=d"
-          }
+    - name: Run historical data collector
+      run: |
+        python - <<'EOF'
+        import requests, pandas as pd, datetime, sqlite3, json
+        from bs4 import BeautifulSoup
 
-          dfs = []
-          for sym, url in assets.items():
-              try:
-                  df = pd.read_csv(url)
-                  df["symbol"] = sym
-                  dfs.append(df)
-              except Exception as e:
-                  print("Error fetching", sym, e)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        assets = {
+            "XAUUSD": "https://stooq.com/q/d/l/?s=xauusd&i=d",
+            "BTCUSD": "https://stooq.com/q/d/l/?s=btcusd&i=d",
+            "NAS100": "https://stooq.com/q/d/l/?s=^ndx&i=d",
+            "EURUSD": "https://stooq.com/q/d/l/?s=eurusd&i=d"
+        }
 
-          all_data = pd.concat(dfs)
-          # ไฟล์ historical_data.db และ news_archive.json ถูกสร้างขึ้นในขั้นตอนนี้
-          conn = sqlite3.connect("historical_data.db")
-          all_data.to_sql("history", conn, if_exists="replace", index=False)
-          conn.close()
+        print("📊 เริ่มดึงข้อมูลราคาย้อนหลัง...")
 
-          # ข่าว
-          news_list = []
-          try:
-              html = requests.get("https://www.reuters.com/markets/", headers=headers).text
-              soup = BeautifulSoup(html, "html.parser")
-              for a in soup.find_all("a", href=True)[:20]:
-                  t = a.get_text().strip()
-                  if len(t) > 20:
-                      news_list.append({"source": "Reuters", "headline": t, "url": "https://www.reuters.com" + a["href"]})
-          except Exception as e:
-              print("Reuters error", e)
+        dfs = []
+        for sym, url in assets.items():
+            try:
+                df = pd.read_csv(url)
+                df["symbol"] = sym
+                dfs.append(df)
+            except Exception as e:
+                print("❌ Error fetching", sym, e)
 
-          try:
-              html = requests.get("https://www.forexfactory.com/news", headers=headers).text
-              soup = BeautifulSoup(html, "html.parser")
-              for a in soup.find_all("a", href=True)[:20]:
-                  t = a.get_text().strip()
-                  if len(t) > 20:
-                      news_list.append({"source": "ForexFactory", "headline": t, "url": "https://www.forexfactory.com" + a["href"]})
-          except Exception as e:
-              print("FF error", e)
+        all_data = pd.concat(dfs)
+        conn = sqlite3.connect("historical_data.db")
+        all_data.to_sql("history", conn, if_exists="replace", index=False)
+        conn.close()
+        print("✅ บันทึก historical_data.db แล้ว")
 
-          pd.DataFrame(news_list).to_json("news_archive.json", indent=2)
-          EOF
+        print("📰 เริ่มดึงข่าวเศรษฐกิจ...")
+        news_list = []
 
-      # ขั้นตอนนี้ถูกลบออกทั้งหมดเนื่องจากเกิด Error 403 และข้อจำกัดด้านการเงิน
-      # - name: Upload to Google Drive ... (REMOVE THIS ENTIRE BLOCK)
+        try:
+            html = requests.get("https://www.reuters.com/markets/", headers=headers).text
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.find_all("a", href=True)[:20]:
+                t = a.get_text().strip()
+                if len(t) > 20:
+                    news_list.append({
+                        "source": "Reuters",
+                        "headline": t,
+                        "url": "https://www.reuters.com" + a["href"]
+                    })
+        except Exception as e:
+            print("Reuters error:", e)
 
-      - name: Commit and Save Data to GitHub Repository
-        # ใช้ GITHUB_TOKEN อัตโนมัติที่ GitHub จัดเตรียมไว้ให้
-        run: |
-          # 1. ตั้งค่า Git Identity (ต้องทำเพื่อให้ Git รู้ว่าใคร Commit)
-          git config user.name "GitHub Actions Bot"
-          git config user.email "action@github.com"
-          
-          # 2. Add ไฟล์ข้อมูลที่สร้างขึ้น
-          git add historical_data.db news_archive.json
-          
-          # 3. Commit ถ้ามีการเปลี่ยนแปลง (|| true ป้องกันการล้มเหลวถ้าไม่มีการเปลี่ยนแปลง)
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          git commit -m "Data Update: $TIMESTAMP" || true
-          
-          # 4. Push กลับไปยัง Branch ปัจจุบัน
-          git push
+        try:
+            html = requests.get("https://www.forexfactory.com/news", headers=headers).text
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.find_all("a", href=True)[:20]:
+                t = a.get_text().strip()
+                if len(t) > 20:
+                    news_list.append({
+                        "source": "ForexFactory",
+                        "headline": t,
+                        "url": "https://www.forexfactory.com" + a["href"]
+                    })
+        except Exception as e:
+            print("ForexFactory error:", e)
+
+        pd.DataFrame(news_list).to_json("news_archive.json", indent=2, force_ascii=False)
+        print(f"✅ บันทึกข่าวทั้งหมด {len(news_list)} รายการลง news_archive.json แล้ว")
+        EOF
+
+    - name: Commit and Save Data to GitHub Repository
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "action@github.com"
+        
+        git add historical_data.db news_archive.json
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        git commit -m "Data Update: $TIMESTAMP" || true
+        git push
