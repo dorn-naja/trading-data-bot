@@ -71,32 +71,48 @@ jobs:
         else:
             print("⚠️ ไม่มีข้อมูลราคาจากทุกแหล่ง!")
 
-        # ========== 2️⃣ ข่าวเศรษฐกิจจากหลายเว็บ ==========
+        # ========== 2️⃣ ข่าวเศรษฐกิจจากหลายเว็บ (RSS + HTML สำรอง) ==========
         print("📰 เริ่มดึงข่าวจากหลายแหล่ง...")
 
         news_sources = {
-            "Reuters": "https://www.reuters.com/markets/",
-            "ForexFactory": "https://www.forexfactory.com/news",
-            "Investing": "https://www.investing.com/news/",
-            "CNBC": "https://www.cnbc.com/world/",
-            "MarketWatch": "https://www.marketwatch.com/latest-news"
+            "Reuters": "https://feeds.reuters.com/reuters/businessNews",
+            "Investing": "https://www.investing.com/rss/news_25.rss",
+            "CNBC": "https://www.cnbc.com/id/10001147/device/rss/rss.html",
+            "MarketWatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+            "ForexFactory": "https://www.forexfactory.com/news"
         }
 
         all_news = []
         for site, url in news_sources.items():
             try:
-                html = requests.get(url, headers=headers, timeout=10).text
-                soup = BeautifulSoup(html, "lxml")
-                titles = [a.get_text().strip() for a in soup.find_all("a", href=True)]
-                for t in titles[:30]:
-                    if len(t) > 40:
-                        all_news.append({
-                            "source": site,
-                            "headline": t,
-                            "url": url,
-                            "time": datetime.datetime.utcnow().isoformat()
-                        })
-                print(f"✅ {site}: เก็บข่าวได้ {len(titles[:30])} รายการ")
+                print(f"⏳ ดึงข่าวจาก {site} ...")
+                resp = requests.get(url, headers=headers, timeout=15)
+                if resp.status_code == 200:
+                    if "<rss" in resp.text or url.endswith(".rss"):
+                        # อ่านจาก RSS โดยตรง
+                        soup = BeautifulSoup(resp.text, "xml")
+                        for item in soup.find_all("item")[:30]:
+                            title = item.title.get_text()
+                            link = item.link.get_text()
+                            all_news.append({
+                                "source": site,
+                                "headline": title,
+                                "url": link,
+                                "time": datetime.datetime.utcnow().isoformat()
+                            })
+                    else:
+                        # สำรองแบบ HTML
+                        soup = BeautifulSoup(resp.text, "html.parser")
+                        for tag in soup.find_all(["h2", "h3", "a"], limit=30):
+                            title = tag.get_text().strip()
+                            if len(title) > 25:
+                                all_news.append({
+                                    "source": site,
+                                    "headline": title,
+                                    "url": url,
+                                    "time": datetime.datetime.utcnow().isoformat()
+                                })
+                print(f"✅ {site}: เก็บข่าวได้ {len(all_news)} รายการรวม")
                 time.sleep(2)
             except Exception as e:
                 print(f"❌ {site} error:", e)
@@ -118,7 +134,7 @@ jobs:
             "update_time": datetime.datetime.utcnow().isoformat(),
             "prices_count": len(all_prices) if price_dfs else 0,
             "news_count": len(all_news),
-            "sources_success": [k for k in news_sources.keys()],
+            "sources_success": list(news_sources.keys())
         }
         with open("summary.json","w",encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
