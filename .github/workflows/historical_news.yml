@@ -1,4 +1,4 @@
-name: Historical + News Hybrid Collector
+Name: Historical + News Hybrid Collector
 
 on:
   workflow_dispatch:
@@ -9,6 +9,7 @@ jobs:
 
     steps:
       - name: Checkout repository
+        # ต้องใช้ actions/checkout@v3 เพื่อให้มีสิทธิ์ในการ commit/push
         uses: actions/checkout@v3
 
       - name: Setup Python
@@ -18,9 +19,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 pandas google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client sqlalchemy
-
+          # ลบ dependencies ของ Google Drive API ที่ไม่จำเป็นออก เพื่อลดเวลาติดตั้ง
+          pip install requests beautifulsoup4 pandas sqlalchemy
+          
       - name: Run historical data collector
+        # โค้ด Python นี้จะถูกเก็บไว้เหมือนเดิม เพราะสร้างไฟล์ .db และ .json ได้ถูกต้อง
         run: |
           python - <<'EOF'
           import requests, pandas as pd, datetime, time, sqlite3, json
@@ -44,6 +47,7 @@ jobs:
                   print("Error fetching", sym, e)
 
           all_data = pd.concat(dfs)
+          # ไฟล์ historical_data.db และ news_archive.json ถูกสร้างขึ้นในขั้นตอนนี้
           conn = sqlite3.connect("historical_data.db")
           all_data.to_sql("history", conn, if_exists="replace", index=False)
           conn.close()
@@ -73,31 +77,22 @@ jobs:
           pd.DataFrame(news_list).to_json("news_archive.json", indent=2)
           EOF
 
-      - name: Upload to Google Drive
-        env:
-          GDRIVE_CREDENTIALS_JSON: ${{ secrets.GDRIVE_CREDENTIALS_JSON }}
+      # ขั้นตอนนี้ถูกลบออกทั้งหมดเนื่องจากเกิด Error 403 และข้อจำกัดด้านการเงิน
+      # - name: Upload to Google Drive ... (REMOVE THIS ENTIRE BLOCK)
+
+      - name: Commit and Save Data to GitHub Repository
+        # ใช้ GITHUB_TOKEN อัตโนมัติที่ GitHub จัดเตรียมไว้ให้
         run: |
-          python - <<'EOF'
-          import os, json
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
-
-          creds = service_account.Credentials.from_service_account_info(
-              json.loads(os.environ["GDRIVE_CREDENTIALS_JSON"]),
-              scopes=["https://www.googleapis.com/auth/drive.file"]
-          )
-          drive_service = build("drive", "v3", credentials=creds)
-
-          folder_name = "Data githup"
-          results = drive_service.files().list(q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'", fields="files(id)").execute()
-          folder_id = results["files"][0]["id"] if results["files"] else None
-          if not folder_id:
-              folder = drive_service.files().create(body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}, fields="id").execute()
-              folder_id = folder.get("id")
-
-          for f in ["historical_data.db", "news_archive.json"]:
-              if os.path.exists(f):
-                  media = MediaFileUpload(f, resumable=True)
-                  drive_service.files().create(body={"name": f, "parents": [folder_id]}, media_body=media, fields="id").execute()
-          EOF
+          # 1. ตั้งค่า Git Identity (ต้องทำเพื่อให้ Git รู้ว่าใคร Commit)
+          git config user.name "GitHub Actions Bot"
+          git config user.email "action@github.com"
+          
+          # 2. Add ไฟล์ข้อมูลที่สร้างขึ้น
+          git add historical_data.db news_archive.json
+          
+          # 3. Commit ถ้ามีการเปลี่ยนแปลง (|| true ป้องกันการล้มเหลวถ้าไม่มีการเปลี่ยนแปลง)
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          git commit -m "Data Update: $TIMESTAMP" || true
+          
+          # 4. Push กลับไปยัง Branch ปัจจุบัน
+          git push
